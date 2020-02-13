@@ -706,7 +706,8 @@ class NicovideoIE(SearchInfoExtractor):
 
 class NiconicoLiveIE(InfoExtractor):
     _VALID_URL = r'https?://live2?.nicovideo\.jp/watch/(?P<id>lv\d+)'
-
+    _NETRC_MACHINE = 'niconico'
+    
     _TEST = {} # fuck tests
 
     def _real_initialize(self):
