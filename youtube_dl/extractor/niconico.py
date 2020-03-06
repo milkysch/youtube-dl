@@ -267,7 +267,7 @@ class NiconicoIE(InfoExtractor):
         heartbeat_url = session_api_endpoint['url'] + '/' + session_response['data']['session']['id'] + '?_format=json&_method=PUT'
         heartbeat_data = json.dumps(session_response['data']).encode()
         # interval, convert milliseconds to seconds, then halve to make a buffer.
-        heartbeat_interval = session_api_data['heartbeat_lifetime'] / 2000
+        heartbeat_interval = session_api_data['heartbeat_lifetime'] / 8000
 
         resolution = video_quality.get('resolution', {})
 
@@ -479,15 +479,18 @@ class NiconicoIE(InfoExtractor):
         root_thread_id = 0 # thread_ids[0]
 
         # make API call
-        en_raw_comment_list = self._extract_all_comments(video_id, thread_ids, True)
-        jp_raw_comment_list = self._extract_all_comments(video_id, thread_ids, False)
+        en_raw_comment_list = self._extract_all_comments(video_id, thread_ids, 1)
+        jp_raw_comment_list = self._extract_all_comments(video_id, thread_ids, 0)
+        cn_raw_comment_list = self._extract_all_comments(video_id, thread_ids, 2)
         
         danmaku_content_en = NiconicoIE.CreateDanmaku(json.dumps(en_raw_comment_list))
         danmaku_content_jp = NiconicoIE.CreateDanmaku(json.dumps(jp_raw_comment_list))
+        danmaku_content_cn = NiconicoIE.CreateDanmaku(json.dumps(cn_raw_comment_list))
 
 
         comments = self._process_raw_comments(en_raw_comment_list, root_thread_id, 'en') \
-                 + self._process_raw_comments(jp_raw_comment_list, root_thread_id, 'jp')
+                 + self._process_raw_comments(jp_raw_comment_list, root_thread_id, 'jp') \
+                 + self._process_raw_comments(cn_raw_comment_list, root_thread_id, 'cn')
 
         tags_nodes = video_info_xml.findall('.//tags/tag')
         tags = list(map(lambda x: x.text, tags_nodes))
@@ -498,7 +501,12 @@ class NiconicoIE(InfoExtractor):
             'id': video_id,
             'title': title,
             'formats': formats,
-            'thumbnail': thumbnail,
+            'thumbnails': [
+                {
+                    'url': thumbnail,
+                    'ext': 'jpg'
+                }
+            ],
             'description': description,
             'uploader': uploader,
             'timestamp': timestamp,
@@ -510,6 +518,7 @@ class NiconicoIE(InfoExtractor):
             'raw_comments': {
                 'en': en_raw_comment_list,
                 'jp': jp_raw_comment_list,
+                'cn': cn_raw_comment_list,
             },
             'comments': comments,
             'subtitles': {
@@ -520,6 +529,10 @@ class NiconicoIE(InfoExtractor):
                 'danmaku-jp': [{
                     'ext': 'ass',
                     'data': danmaku_content_jp
+                }],
+                'danmaku-cn': [{
+                    'ext': 'ass',
+                    'data': danmaku_content_cn
                 }]
             },
             'duration': duration,
@@ -559,7 +572,7 @@ class NiconicoIE(InfoExtractor):
         
         return comments
 
-    def _extract_all_comments(self, video_id, thread_ids, english):
+    def _extract_all_comments(self, video_id, thread_ids, language_id):
 
         i = 0
         raw_json = []
@@ -597,7 +610,7 @@ class NiconicoIE(InfoExtractor):
                         { "ping": {"content": "ps:1" } },
                         { "thread_leaves": {
                             "thread": thread_id,
-                            "language":' 1' if english else '0',
+                            "language": language_id,
                             "user_id": "",
                             "content": "0-999999:999999,999999", # format is "<bottom of minute range>-<top of minute range>:<comments per minute>,<total last comments"
                                                                  # unfortunately NND limits (deletes?) comment returns this way, so you're only able to grab the last 1000 per language
@@ -607,7 +620,10 @@ class NiconicoIE(InfoExtractor):
                         { "ping": {"content": "pf:1" } },
                         { "ping": {"content": "rf:0" } }
                     ]).encode(),
-                note='Downloading comments from thread %s/%s (%s)' % (i, len(thread_ids), 'en' if english else 'jp')
+                note='Downloading comments from thread %s/%s (%s)' % (i, len(thread_ids), 'en' if language_id == 1 else
+                                                                                          'jp' if language_id == 0 else
+                                                                                          'cn' if language_id == 2 else 
+                                                                                          'unknown')
             )
 
         return raw_json
@@ -654,28 +670,23 @@ class NiconicoPlaylistIE(InfoExtractor):
 # USAGE: youtube-dl "nicosearch<NUMBER OF ENTRIES>:<SEARCH STRING>"
 class NicovideoIE(SearchInfoExtractor):
     IE_DESC = 'Nico video search'
-    _MAX_RESULTS = 100000
+    _MAX_RESULTS = 1000000
     _SEARCH_KEY = 'nicosearch'
+    _START_DATE = datetime.date(2007, 1, 1)
+    _MAX_NUMBER_OF_PAGES = 50
+    _RESULTS_PER_PAGE = 32
 
     def _get_n_results(self, query, n):
         """Get a specified number of results for a query"""
         entries = []
         currDate = datetime.datetime.now().date()
 
-        while True:
-            search_url = "http://www.nicovideo.jp/search/%s" % query
-            r = self._get_entries_for_date(search_url, query, currDate)
+        search_url = "http://www.nicovideo.jp/search/%s" % query
+        r = self._get_entries_for_span(search_url, query, self._START_DATE, currDate)
 
-            # did we gather more entries in the last few pages than were asked for? If so, only add as many as are needed to reach the desired number.
-            m = n - len(entries)
-            entries += r[0:min(m, len(r))]
-
-            # for a given search, nicovideo will show a maximum of 50 pages. My way around this is specifying a date for the search, down to the date, which for the most part
-            # is a guarantee that the number of pages in the search results will not exceed 50. For any given search for a day, we extract everything available, and move on, until
-            # finding as many entries as were requested.
-            currDate -= datetime.timedelta(days=1)
-            if(len(entries) >= n or currDate < datetime.date(2007, 1, 1)):
-                break
+        # did we gather more entries than were asked for? If so, only add as many as are needed to reach the desired number.
+        m = n - len(entries)
+        entries += r[0:min(m, len(r))]
 
         return {
             '_type': 'playlist',
@@ -683,11 +694,51 @@ class NicovideoIE(SearchInfoExtractor):
             'entries': entries
         }
 
-    def _get_entries_for_date(self, url, query, date, pageNumber=1):
+    def _get_results_until(self, query, last_video):
+        entries = []
+        currDate = datetime.datetime.now().date()
+
+        search_url = "http://www.nicovideo.jp/search/%s" % query
+        r = self._get_entries_for_date(search_url, query, self._START_DATE, currDate)
+
+        final_index = self._MAX_RESULTS
+
+        for i in range(len(r)):
+            try:
+                if(r[i]['url'].split("/")[-1] == last_video):
+                    final_index = i
+                    break
+            except ValueError:
+                continue
+
+        # if we marked the final index, only add videos until we hit it
+        entries += r[0:min(final_index, len(r))]
+
+        return {
+            '_type': 'playlist',
+            'id': query,
+            'entries': entries
+        }
+
+    def _get_entries_for_span(self, url, query, startDate, endDate):
+        # divide and conquer
+        entries = self._get_entries_for_date(url, query, startDate, endDate=endDate)
+        if (len(entries) >= self._MAX_NUMBER_OF_PAGES * self._RESULTS_PER_PAGE and startDate != endDate):
+            midpoint = startDate + (endDate - startDate)/2
+            right = self._get_entries_for_span(url, query, startDate, midpoint)
+            left = self._get_entries_for_span(url, query, midpoint, endDate)
+            entries = left + right
+
+        return entries
+
+    def _get_entries_for_date(self, url, query, startDate, endDate=None, pageNumber=1):
+        if endDate is None:
+            endDate = startDate
+
+        entries = []
         while True:
-            link = url + "?page=" + str(pageNumber) + "&start=" + str(date) + "&end=" + str(date)
-            results = self._download_webpage(link, "None", query={"Search_key": query}, note='Extracting results from page %s for date %s' % (pageNumber, date))
-            entries = []
+            link = url + "?page=" + str(pageNumber) + "&start=" + str(startDate) + "&end=" + str(endDate) + "&sort=f&order=d"
+            results = self._download_webpage(link, "None", query={"Search_key": query}, note='Extracting results from page %s for date %s to %s' % (pageNumber, startDate, endDate))
             r = re.findall(r'(?<=data-video-id=)["\']?(?P<videoid>.*?)(?=["\'])', results)
 
             for item in r:
@@ -696,7 +747,7 @@ class NicovideoIE(SearchInfoExtractor):
 
             # each page holds a maximum of 32 entries. If we've seen 32 entries on the current page,
             # it's possible there may be another, so we can check. It's a little awkward, but it works.
-            if(len(r) < 32):
+            if(len(r) < self._RESULTS_PER_PAGE):
                 break
 
             pageNumber += 1
@@ -843,11 +894,11 @@ class NiconicoLiveIE(InfoExtractor):
 
             playlistUrl = q.get()
 
+            formats = self._extract_m3u8_formats(playlistUrl, video_id)
+
             return {
                 'id': video_id,
-                '_type': 'url_transparent',
-                'protocol': 'hls',
-                'url': playlistUrl,
+                'formats': formats,
                 'title': embedded_data['program']['title'],
                 'view_count': embedded_data['program']['statistics']['watchCount'],
                 'comment_count': embedded_data['program']['statistics']['commentCount'],
